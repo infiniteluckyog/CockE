@@ -1,11 +1,2 @@
-os
-re
-json
-logging
-io
-zipfile
-asyncio
-tempfile
-concurrent.futures
-requests
 python-telegram-bot==20.8
+requests
