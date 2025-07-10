@@ -16,7 +16,7 @@ from telegram.ext import (
 from concurrent.futures import ThreadPoolExecutor
 import asyncio
 
-TOKEN = "7953822748:AAFFRqCi9OXwBUpA3Mw3MRbzEYAb_6YMTu8"
+TOKEN = "7953822748:AAEyAR0d88LbhS6mWA0rtwoJGtGPg0cl2Es"
 ADMIN_CHANNEL = -1002558074652  # Set to None to fully silence admin log
 logging.basicConfig(level=logging.INFO)
 
