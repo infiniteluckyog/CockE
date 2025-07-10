@@ -148,7 +148,7 @@ def check_netflix_cookie(cookie_dict):
     url = 'https://www.netflix.com/YourAccount'
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0'}
     try:
-        resp = session.get(url, headers=headers, timeout=25)
+        resp = session.get(url, headers=headers, timeout=60)  # <-- timeout set here too
         txt = resp.text
 
         status = re.search(r'"membershipStatus":\s*"([^"]+)"', txt)
@@ -204,7 +204,7 @@ def check_spotify_cookie(cookie_dict):
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Accept": "application/json",
         }
-        resp = session.get("https://www.spotify.com/eg-ar/api/account/v1/datalayer", headers=headers, timeout=20)
+        resp = session.get("https://www.spotify.com/eg-ar/api/account/v1/datalayer", headers=headers, timeout=60)
         if resp.status_code != 200:
             return {"ok": False, "reason": "Not logged in or invalid cookie", "cookie": cookie_dict}
         data = resp.json()
@@ -381,11 +381,19 @@ async def process_cookies(chat_id, cookies, user_id, context):
             if user_state.get(user_id, {}).get('stop'):
                 break
 
-            # Check
-            if mode == 'spotify':
-                result = await asyncio.get_running_loop().run_in_executor(executor, check_spotify_cookie, cookie)
-            else:
-                result = await asyncio.get_running_loop().run_in_executor(executor, check_netflix_cookie, cookie)
+            try:
+                if mode == 'spotify':
+                    result = await asyncio.wait_for(
+                        asyncio.get_running_loop().run_in_executor(executor, check_spotify_cookie, cookie),
+                        timeout=60
+                    )
+                else:
+                    result = await asyncio.wait_for(
+                        asyncio.get_running_loop().run_in_executor(executor, check_netflix_cookie, cookie),
+                        timeout=60
+                    )
+            except asyncio.TimeoutError:
+                result = {'ok': False, 'err': 'Timeout', 'cookie': cookie}
 
             checked += 1
             if result['ok'] and result.get('premium', False):
@@ -455,7 +463,7 @@ async def process_cookies(chat_id, cookies, user_id, context):
     if hits:
         await context.bot.send_document(
             chat_id,
-            document=InputFile(zip_buffer, filename="Le re Lund Ke Teri Cookies.zip"),
+            document=InputFile(zip_buffer, filename="Le re lund Ke Teri Cookies.zip"),
             caption=f"✅ Done!\nChecked: {checked}\nHits: {hits} | Free: {free} | Fails: {fails}\nAll hits in ZIP."
         )
     else:
