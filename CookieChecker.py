@@ -23,8 +23,8 @@ logging.basicConfig(level=logging.INFO)
 user_state = {}
 user_executors = {}
 user_tasks = {}
-MAX_WORKERS_PER_USER = 5
-BATCH_SIZE = 5
+MAX_WORKERS_PER_USER = 3
+BATCH_SIZE = 3
 
 START_MSG = (
     "<code>\n"
